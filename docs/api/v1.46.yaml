@@ -1195,6 +1195,7 @@ definitions:
               - "default"
               - "process"
               - "hyperv"
+              - ""
           MaskedPaths:
             type: "array"
             description: |
@@ -4167,6 +4168,7 @@ definitions:
               - "default"
               - "process"
               - "hyperv"
+              - ""
           Init:
             description: |
               Run an init inside the container that forwards signals and reaps
@@ -5737,6 +5739,7 @@ definitions:
           - "default"
           - "hyperv"
           - "process"
+          - ""
       InitBinary:
         description: |
           Name and, optional, path of the `docker-init` binary.
@@ -5807,8 +5810,6 @@ definitions:
           type: "string"
         example:
           - "WARNING: No memory limit support"
-          - "WARNING: bridge-nf-call-iptables is disabled"
-          - "WARNING: bridge-nf-call-ip6tables is disabled"
       CDISpecDirs:
         description: |
           List of directories where (Container Device Interface) CDI
@@ -5931,55 +5932,27 @@ definitions:
           List of IP ranges to which nondistributable artifacts can be pushed,
           using the CIDR syntax [RFC 4632](https://tools.ietf.org/html/4632).
 
-          Some images (for example, Windows base images) contain artifacts
-          whose distribution is restricted by license. When these images are
-          pushed to a registry, restricted artifacts are not included.
+          <p><br /></p>
 
-          This configuration override this behavior, and enables the daemon to
-          push nondistributable artifacts to all registries whose resolved IP
-          address is within the subnet described by the CIDR syntax.
-
-          This option is useful when pushing images containing
-          nondistributable artifacts to a registry on an air-gapped network so
-          hosts on that network can pull the images without connecting to
-          another server.
-
-          > **Warning**: Nondistributable artifacts typically have restrictions
-          > on how and where they can be distributed and shared. Only use this
-          > feature to push artifacts to private registries and ensure that you
-          > are in compliance with any terms that cover redistributing
-          > nondistributable artifacts.
-
+          > **Deprecated**: Pushing nondistributable artifacts is now always enabled
+          > and this field is always `null`.
         type: "array"
         items:
           type: "string"
-        example: ["::1/128", "127.0.0.0/8"]
+        example: []
       AllowNondistributableArtifactsHostnames:
         description: |
           List of registry hostnames to which nondistributable artifacts can be
           pushed, using the format `<hostname>[:<port>]` or `<IP address>[:<port>]`.
 
-          Some images (for example, Windows base images) contain artifacts
-          whose distribution is restricted by license. When these images are
-          pushed to a registry, restricted artifacts are not included.
+          <p><br /></p>
 
-          This configuration override this behavior for the specified
-          registries.
-
-          This option is useful when pushing images containing
-          nondistributable artifacts to a registry on an air-gapped network so
-          hosts on that network can pull the images without connecting to
-          another server.
-
-          > **Warning**: Nondistributable artifacts typically have restrictions
-          > on how and where they can be distributed and shared. Only use this
-          > feature to push artifacts to private registries and ensure that you
-          > are in compliance with any terms that cover redistributing
-          > nondistributable artifacts.
+          > **Deprecated**: Pushing nondistributable artifacts is now always enabled
+          > and this field is always `null`.
         type: "array"
         items:
           type: "string"
-        example: ["registry.internal.corp.example.com:3000", "[2001:db8:a0b:12f0::1]:443"]
+        example: []
       InsecureRegistryCIDRs:
         description: |
           List of IP ranges of insecure registries, using the CIDR syntax
@@ -9114,6 +9087,19 @@ paths:
             all tags of the given image that are present in the local image store
             are pushed.
           type: "string"
+        - name: "platform"
+          type: "string"
+          in: "query"
+          description: |
+            JSON-encoded OCI platform to select the platform-variant to push.
+            If not provided, all available variants will attempt to be pushed.
+
+            If the daemon provides a multi-platform image store, this selects
+            the platform-variant to push to the registry. If the image is
+            a single-platform image, or if the multi-platform image does not
+            provide a variant matching the given platform, an error is returned.
+
+            Example: `{"os": "linux", "architecture": "arm", "variant": "v5"}`
         - name: "X-Registry-Auth"
           in: "header"
           description: |
@@ -9123,11 +9109,6 @@ paths:
             details.
           type: "string"
           required: true
-        - name: "platform"
-          in: "query"
-          description: "Select a platform-specific manifest to be pushed. OCI platform (JSON encoded)"
-          type: "string"
-          x-nullable: true
       tags: ["Image"]
   /images/{name}/tag:
     post:
@@ -9423,7 +9404,7 @@ paths:
             type: "string"
             example: "OK"
           headers:
-            API-Version:
+            Api-Version:
               type: "string"
               description: "Max API Version the server supports"
             Builder-Version:
@@ -9479,7 +9460,7 @@ paths:
             type: "string"
             example: "(empty)"
           headers:
-            API-Version:
+            Api-Version:
               type: "string"
               description: "Max API Version the server supports"
             Builder-Version:
@@ -11494,6 +11475,7 @@ paths:
             example:
               ListenAddr: "0.0.0.0:2377"
               AdvertiseAddr: "192.168.1.1:2377"
+              DataPathAddr: "192.168.1.1"
               RemoteAddrs:
                 - "node1:2377"
               JoinToken: "SWMTKN-1-3pu6hszjas19xyp7ghgosyx9k8atbfcr8p2is99znpy26u2lkl-7p73s1dx5in4tatdymyhg9hu2"

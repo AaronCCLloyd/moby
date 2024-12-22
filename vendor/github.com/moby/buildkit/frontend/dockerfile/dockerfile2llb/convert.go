@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -375,6 +376,7 @@ func toDispatchState(ctx context.Context, dt []byte, opt ConvertOpt) (*dispatchS
 					}
 				}
 				allDispatchStates.addState(ds)
+				ds.base = nil // reset base set by addState
 				continue
 			}
 		}
@@ -606,8 +608,18 @@ func toDispatchState(ctx context.Context, dt []byte, opt ConvertOpt) (*dispatchS
 		for d := range allReachable {
 			d.init()
 
-			if len(d.image.Config.OnBuild) > 0 {
-				if b, err := initOnBuildTriggers(d, d.image.Config.OnBuild, allDispatchStates); err != nil {
+			onbuilds := slices.Clone(d.image.Config.OnBuild)
+			if d.base != nil && !d.onBuildInit {
+				for _, cmd := range d.base.commands {
+					if obCmd, ok := cmd.Command.(*instructions.OnbuildCommand); ok {
+						onbuilds = append(onbuilds, obCmd.Expression)
+					}
+				}
+				d.onBuildInit = true
+			}
+
+			if len(onbuilds) > 0 {
+				if b, err := initOnBuildTriggers(d, onbuilds, allDispatchStates); err != nil {
 					return nil, parser.SetLocation(err, d.stage.Location)
 				} else if b {
 					newDeps = true
@@ -1002,18 +1014,19 @@ func dispatch(d *dispatchState, cmd command, opt dispatchOpt) error {
 }
 
 type dispatchState struct {
-	opt        dispatchOpt
-	state      llb.State
-	image      dockerspec.DockerOCIImage
-	platform   *ocispecs.Platform
-	stage      instructions.Stage
-	base       *dispatchState
-	baseImg    *dockerspec.DockerOCIImage // immutable, unlike image
-	dispatched bool
-	resolved   bool // resolved is set to true if base image has been resolved
-	deps       map[*dispatchState]instructions.Command
-	buildArgs  []instructions.KeyValuePairOptional
-	commands   []command
+	opt         dispatchOpt
+	state       llb.State
+	image       dockerspec.DockerOCIImage
+	platform    *ocispecs.Platform
+	stage       instructions.Stage
+	base        *dispatchState
+	baseImg     *dockerspec.DockerOCIImage // immutable, unlike image
+	dispatched  bool
+	resolved    bool // resolved is set to true if base image has been resolved
+	onBuildInit bool
+	deps        map[*dispatchState]instructions.Command
+	buildArgs   []instructions.KeyValuePairOptional
+	commands    []command
 	// ctxPaths marks the paths this dispatchState uses from the build context.
 	ctxPaths map[string]struct{}
 	// paths marks the paths that are used by this dispatchState.
@@ -1053,6 +1066,8 @@ func (ds *dispatchState) init() {
 	ds.state = ds.base.state
 	ds.platform = ds.base.platform
 	ds.image = clone(ds.base.image)
+	// onbuild triggers to not carry over from base stage
+	ds.image.Config.OnBuild = nil
 	ds.baseImg = cloneX(ds.base.baseImg)
 	// Utilize the same path index as our base image so we propagate
 	// the paths we use back to the base image.
@@ -1866,12 +1881,18 @@ func dfCmd(cmd interface{}) llb.ConstraintsOpt {
 
 func runCommandString(args []string, buildArgs []instructions.KeyValuePairOptional, env shell.EnvGetter) string {
 	var tmpBuildEnv []string
+	tmpIdx := map[string]int{}
 	for _, arg := range buildArgs {
 		v, ok := env.Get(arg.Key)
 		if !ok {
 			v = arg.ValueString()
 		}
-		tmpBuildEnv = append(tmpBuildEnv, arg.Key+"="+v)
+		if idx, ok := tmpIdx[arg.Key]; ok {
+			tmpBuildEnv[idx] = arg.Key + "=" + v
+		} else {
+			tmpIdx[arg.Key] = len(tmpBuildEnv)
+			tmpBuildEnv = append(tmpBuildEnv, arg.Key+"="+v)
+		}
 	}
 	if len(tmpBuildEnv) > 0 {
 		tmpBuildEnv = append([]string{fmt.Sprintf("|%d", len(tmpBuildEnv))}, tmpBuildEnv...)

@@ -13,7 +13,15 @@ const (
 	// default value. On Windows keep this empty so the value is auto-detected
 	// based on other options.
 	StockRuntimeName = ""
+
+	WindowsV1RuntimeName = "com.docker.hcsshim.v1"
+	WindowsV2RuntimeName = "io.containerd.runhcs.v1"
 )
+
+var builtinRuntimes = map[string]bool{
+	WindowsV1RuntimeName: true,
+	WindowsV2RuntimeName: true,
+}
 
 // BridgeConfig is meant to store all the parameters for both the bridge driver and the default bridge network. On
 // Windows: 1. "bridge" in this context reference the nat driver and the default nat network; 2. the nat driver has no
@@ -56,11 +64,10 @@ func (conf *Config) IsSwarmCompatible() error {
 }
 
 // ValidatePlatformConfig checks if any platform-specific configuration settings are invalid.
+//
+// Deprecated: this function was only used internally and is no longer used. Use [Validate] instead.
 func (conf *Config) ValidatePlatformConfig() error {
-	if conf.MTU != 0 && conf.MTU != DefaultNetworkMtu {
-		log.G(context.TODO()).Warn(`WARNING: MTU for the default network is not configurable on Windows, and this option will be ignored.`)
-	}
-	return nil
+	return validatePlatformConfig(conf)
 }
 
 // IsRootless returns conf.Rootless on Linux but false on Windows
@@ -72,5 +79,13 @@ func setPlatformDefaults(cfg *Config) error {
 	cfg.Root = filepath.Join(os.Getenv("programdata"), "docker")
 	cfg.ExecRoot = filepath.Join(os.Getenv("programdata"), "docker", "exec-root")
 	cfg.Pidfile = filepath.Join(cfg.Root, "docker.pid")
+	return nil
+}
+
+// validatePlatformConfig checks if any platform-specific configuration settings are invalid.
+func validatePlatformConfig(conf *Config) error {
+	if conf.MTU != 0 && conf.MTU != DefaultNetworkMtu {
+		log.G(context.TODO()).Warn(`WARNING: MTU for the default network is not configurable on Windows, and this option will be ignored.`)
+	}
 	return nil
 }

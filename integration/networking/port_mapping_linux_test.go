@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/icmd"
+	"gotest.tools/v3/poll"
 	"gotest.tools/v3/skip"
 )
 
@@ -254,8 +256,16 @@ func TestProxy4To6(t *testing.T) {
 	inspect := container.Inspect(ctx, t, c, serverId)
 	hostPort := inspect.NetworkSettings.Ports["80/tcp"][0].HostPort
 
-	resp, err := http.Get("http://[::1]:" + hostPort)
-	assert.NilError(t, err)
+	var resp *http.Response
+	addr := "http://[::1]:" + hostPort
+	poll.WaitOn(t, func(t poll.LogT) poll.Result {
+		var err error
+		resp, err = http.Get(addr) // #nosec G107 -- Ignore "Potential HTTP request made with variable url"
+		if err != nil {
+			return poll.Continue("waiting for %s to be accessible: %v", addr, err)
+		}
+		return poll.Success()
+	})
 	assert.Check(t, is.Equal(resp.StatusCode, 404))
 }
 
@@ -459,6 +469,13 @@ func TestAccessPublishedPortFromRemoteHost(t *testing.T) {
 	}
 }
 
+// TestAccessPublishedPortFromCtr checks that a container's published ports can
+// be reached from the container that published the ports, and a neighbouring
+// container on the same network. It runs in three modes:
+//
+// - userland proxy enabled (default behaviour).
+// - proxy disabled (https://github.com/moby/moby/issues/12632)
+// - proxy disabled, 'bridge-nf-call-iptables=0' (https://github.com/moby/moby/issues/48664)
 func TestAccessPublishedPortFromCtr(t *testing.T) {
 	// This test makes changes to the host's "/proc/sys/net/bridge/bridge-nf-call-iptables",
 	// which would have no effect on rootlesskit's netns.
@@ -543,6 +560,12 @@ func TestAccessPublishedPortFromCtr(t *testing.T) {
 			)
 			defer c.ContainerRemove(ctx, res.ContainerID, containertypes.RemoveOptions{Force: true})
 			assert.Check(t, is.Contains(res.Stderr.String(), "404 Not Found"))
+
+			// Also check that the container can reach its own published port.
+			clientCtx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+			defer cancel2()
+			execRes := container.ExecT(clientCtx2, t, c, serverId, []string{"wget", "http://" + net.JoinHostPort(hostAddr, hostPort)})
+			assert.Check(t, is.Contains(execRes.Stderr(), "404 Not Found"))
 		})
 	}
 }
@@ -636,8 +659,8 @@ func TestDirectRoutingOpenPorts(t *testing.T) {
 		netip.MustParsePrefix("192.168.124.3/24"),
 		netip.MustParsePrefix("fdc0:36dc:a4dd::3/64"))
 	// Add default routes to the "docker" Host from the "remote" Host.
-	l3.Hosts["remote"].Run(t, "ip", "route", "add", "default", "via", "192.168.124.2")
-	l3.Hosts["remote"].Run(t, "ip", "-6", "route", "add", "default", "via", "fdc0:36dc:a4dd::2")
+	l3.Hosts["remote"].MustRun(t, "ip", "route", "add", "default", "via", "192.168.124.2")
+	l3.Hosts["remote"].MustRun(t, "ip", "-6", "route", "add", "default", "via", "fdc0:36dc:a4dd::2")
 
 	type ctrDesc struct {
 		id   string
@@ -649,10 +672,14 @@ func TestDirectRoutingOpenPorts(t *testing.T) {
 	// Run http servers on ports 80 and 81, but only map/open port 80.
 	createNet := func(gwMode string) ctrDesc {
 		netName := "test-" + gwMode
+		brName := "br-" + gwMode
+		if len(brName) > syscall.IFNAMSIZ {
+			brName = brName[:syscall.IFNAMSIZ-1]
+		}
 		network.CreateNoError(ctx, t, c, netName,
 			network.WithDriver("bridge"),
 			network.WithIPv6(),
-			network.WithOption(bridge.BridgeName, "br-"+gwMode),
+			network.WithOption(bridge.BridgeName, brName),
 			network.WithOption(bridge.IPv4GatewayMode, gwMode),
 			network.WithOption(bridge.IPv6GatewayMode, gwMode),
 		)
@@ -689,12 +716,19 @@ func TestDirectRoutingOpenPorts(t *testing.T) {
 	)
 
 	networks := map[string]ctrDesc{
-		"nat":    createNet("nat"),
-		"routed": createNet("routed"),
+		"nat":             createNet("nat"),
+		"nat-unprotected": createNet("nat-unprotected"),
+		"routed":          createNet("routed"),
 	}
 	expPingExit := map[string]int{
-		"nat":    pingFail,
-		"routed": pingSuccess,
+		"nat":             pingFail,
+		"nat-unprotected": pingSuccess,
+		"routed":          pingSuccess,
+	}
+	expUnmappedPortHTTP := map[string]string{
+		"nat":             httpFail,
+		"nat-unprotected": httpSuccess,
+		"routed":          httpFail,
 	}
 
 	testPing := func(t *testing.T, cmd, addr string, expExit int) {
@@ -724,7 +758,7 @@ func TestDirectRoutingOpenPorts(t *testing.T) {
 	for _, fwdPolicy := range []string{"ACCEPT", "DROP"} {
 		networking.SetFilterForwardPolicies(t, fwdPolicy)
 		t.Run(fwdPolicy, func(t *testing.T) {
-			for _, gwMode := range []string{"nat", "routed"} {
+			for gwMode := range networks {
 				t.Run(gwMode+"/v4/ping", func(t *testing.T) {
 					testPing(t, "ping", networks[gwMode].ipv4, expPingExit[gwMode])
 				})
@@ -735,13 +769,13 @@ func TestDirectRoutingOpenPorts(t *testing.T) {
 					testHttp(t, networks[gwMode].ipv4, "80", httpSuccess)
 				})
 				t.Run(gwMode+"/v4/http/81", func(t *testing.T) {
-					testHttp(t, networks[gwMode].ipv4, "81", httpFail)
+					testHttp(t, networks[gwMode].ipv4, "81", expUnmappedPortHTTP[gwMode])
 				})
 				t.Run(gwMode+"/v6/http/80", func(t *testing.T) {
 					testHttp(t, networks[gwMode].ipv6, "80", httpSuccess)
 				})
 				t.Run(gwMode+"/v6/http/81", func(t *testing.T) {
-					testHttp(t, networks[gwMode].ipv6, "81", httpFail)
+					testHttp(t, networks[gwMode].ipv6, "81", expUnmappedPortHTTP[gwMode])
 				})
 			}
 		})

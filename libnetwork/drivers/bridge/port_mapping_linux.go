@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.21
+//go:build go1.22
 
 package bridge
 
@@ -80,6 +80,7 @@ func (n *bridgeNetwork) addPortMappings(
 	epAddrV4, epAddrV6 *net.IPNet,
 	cfg []types.PortBinding,
 	defHostIP net.IP,
+	noProxy6To4 bool,
 ) (_ []portBinding, retErr error) {
 	if len(defHostIP) == 0 {
 		defHostIP = net.IPv4zero
@@ -132,7 +133,7 @@ func (n *bridgeNetwork) addPortMappings(
 		// by setting up the binding with the IPv4 interface if the userland proxy is enabled
 		// This change was added to keep backward compatibility
 		containerIP := containerIPv6
-		if containerIPv6 == nil {
+		if containerIPv6 == nil && !noProxy6To4 {
 			if proxyPath == "" {
 				// There's no way to map from host-IPv6 to container-IPv4 with the userland proxy
 				// disabled.
@@ -679,7 +680,7 @@ func bindSCTP(cfg portBindingReq, port int) (_ portBinding, retErr error) {
 		uintptr(sd),
 		sctp.SOL_SCTP,
 		sctp.SCTP_INITMSG,
-		uintptr(unsafe.Pointer(&options)),
+		uintptr(unsafe.Pointer(&options)), // #nosec G103 -- Ignore "G103: Use of unsafe calls should be audited"
 		unsafe.Sizeof(options),
 		0); errno != 0 {
 		return portBinding{}, errno
@@ -775,8 +776,11 @@ func (n *bridgeNetwork) setPerPortIptables(b portBinding, enable bool) error {
 	if err := setPerPortNAT(b, v, proxyPath, bridgeName, enable); err != nil {
 		return err
 	}
-	if err := setPerPortForwarding(b, v, bridgeName, enable); err != nil {
-		return err
+
+	if !n.gwMode(v).unprotected() {
+		if err := setPerPortForwarding(b, v, bridgeName, enable); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -807,20 +811,19 @@ func setPerPortNAT(b portBinding, ipv iptables.IPVersion, proxyPath string, brid
 	if ipv == iptables.IPv6 {
 		args = append(args, "!", "-s", "fe80::/10")
 	}
-	rule := iptRule{ipv: ipv, table: iptables.Nat, chain: DockerChain, args: args}
+	rule := iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: DockerChain, Args: args}
 	if err := appendOrDelChainRule(rule, "DNAT", enable); err != nil {
 		return err
 	}
 
-	args = []string{
+	rule = iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: "POSTROUTING", Args: []string{
 		"-p", b.Proto.String(),
 		"-s", b.IP.String(),
 		"-d", b.IP.String(),
 		"--dport", strconv.Itoa(int(b.Port)),
 		"-j", "MASQUERADE",
-	}
-	rule = iptRule{ipv: ipv, table: iptables.Nat, chain: "POSTROUTING", args: args}
-	if err := appendOrDelChainRule(rule, "MASQUERADE", enable); err != nil {
+	}}
+	if err := appendOrDelChainRule(rule, "MASQUERADE", hairpinMode && enable); err != nil {
 		return err
 	}
 
@@ -832,15 +835,14 @@ func setPerPortForwarding(b portBinding, ipv iptables.IPVersion, bridgeName stri
 	// chain (a per-network DROP rule, which must come after these per-port
 	// per-container ACCEPT rules, is appended to the chain when the network
 	// is created).
-	args := []string{
+	rule := iptables.Rule{IPVer: ipv, Table: iptables.Filter, Chain: DockerChain, Args: []string{
 		"!", "-i", bridgeName,
 		"-o", bridgeName,
 		"-p", b.Proto.String(),
 		"-d", b.IP.String(),
 		"--dport", strconv.Itoa(int(b.Port)),
 		"-j", "ACCEPT",
-	}
-	rule := iptRule{ipv: ipv, table: iptables.Filter, chain: DockerChain, args: args}
+	}}
 	if err := programChainRule(rule, "OPEN PORT", enable); err != nil {
 		return err
 	}
@@ -853,13 +855,12 @@ func setPerPortForwarding(b portBinding, ipv iptables.IPVersion, bridgeName stri
 		// to fill the checksum.
 		//
 		// https://github.com/torvalds/linux/commit/c80fafbbb59ef9924962f83aac85531039395b18
-		args = []string{
+		rule := iptables.Rule{IPVer: ipv, Table: iptables.Mangle, Chain: "POSTROUTING", Args: []string{
 			"-p", b.Proto.String(),
 			"--sport", strconv.Itoa(int(b.Port)),
 			"-j", "CHECKSUM",
 			"--checksum-fill",
-		}
-		rule := iptRule{ipv: ipv, table: iptables.Mangle, chain: "POSTROUTING", args: args}
+		}}
 		if err := appendOrDelChainRule(rule, "SCTP CHECKSUM", enable); err != nil {
 			return err
 		}

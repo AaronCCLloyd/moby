@@ -1,5 +1,5 @@
 // FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
-//go:build go1.21
+//go:build go1.22
 
 // Package daemon exposes the functions that occur on the host server
 // that the Docker daemon is running.
@@ -46,7 +46,6 @@ import (
 	_ "github.com/docker/docker/daemon/graphdriver/register" // register graph drivers
 	"github.com/docker/docker/daemon/images"
 	dlogger "github.com/docker/docker/daemon/logger"
-	"github.com/docker/docker/daemon/logger/local"
 	"github.com/docker/docker/daemon/network"
 	"github.com/docker/docker/daemon/snapshotter"
 	"github.com/docker/docker/daemon/stats"
@@ -324,18 +323,6 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 					c.HostConfig.RestartPolicy.MaximumRetryCount = 0
 				}
 
-				// Migrate containers that use the deprecated (and now non-functional)
-				// logentries driver. Update them to use the "local" logging driver
-				// instead.
-				//
-				// TODO(thaJeztah): remove logentries check and migration code in release v26.0.0.
-				if c.HostConfig.LogConfig.Type == "logentries" {
-					baseLogger.Warn("migrated deprecated logentries logging driver")
-					c.HostConfig.LogConfig = containertypes.LogConfig{
-						Type: local.Name,
-					}
-				}
-
 				// Normalize the "default" network mode into the network mode
 				// it aliases ("bridge on Linux and "nat" on Windows). This is
 				// also done by the container router, for new containers. But
@@ -473,7 +460,7 @@ func (daemon *Daemon) restore(cfg *configStore) error {
 
 				c.ResetRestartManager(false)
 				if !c.HostConfig.NetworkMode.IsContainer() && c.IsRunning() {
-					options, err := daemon.buildSandboxOptions(&cfg.Config, c)
+					options, err := buildSandboxOptions(&cfg.Config, c)
 					if err != nil {
 						logger(c).WithError(err).Warn("failed to build sandbox option to restore container")
 					}

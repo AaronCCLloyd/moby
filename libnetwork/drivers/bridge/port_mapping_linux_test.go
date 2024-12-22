@@ -14,6 +14,7 @@ import (
 
 	"github.com/containerd/log"
 	"github.com/docker/docker/internal/testutils/netnsutils"
+	"github.com/docker/docker/internal/testutils/storeutils"
 	"github.com/docker/docker/libnetwork/iptables"
 	"github.com/docker/docker/libnetwork/netlabel"
 	"github.com/docker/docker/libnetwork/ns"
@@ -27,7 +28,7 @@ import (
 
 func TestPortMappingConfig(t *testing.T) {
 	defer netnsutils.SetupTestOSContext(t)()
-	d := newDriver()
+	d := newDriver(storeutils.NewTempStore(t))
 
 	config := &configuration{
 		EnableIPTables: true,
@@ -47,11 +48,12 @@ func TestPortMappingConfig(t *testing.T) {
 	sbOptions := make(map[string]interface{})
 	sbOptions[netlabel.PortMap] = portBindings
 
-	netConfig := &networkConfiguration{
-		BridgeName: DefaultBridgeName,
+	netOptions := map[string]interface{}{
+		netlabel.GenericData: &networkConfiguration{
+			BridgeName: DefaultBridgeName,
+			EnableIPv4: true,
+		},
 	}
-	netOptions := make(map[string]interface{})
-	netOptions[netlabel.GenericData] = netConfig
 
 	ipdList4 := getIPv4Data(t)
 	err := d.CreateNetwork("dummy", netOptions, nil, ipdList4, getIPv6Data(t))
@@ -110,7 +112,7 @@ func TestPortMappingV6Config(t *testing.T) {
 		t.Fatalf("Could not bring loopback iface up: %v", err)
 	}
 
-	d := newDriver()
+	d := newDriver(storeutils.NewTempStore(t))
 
 	config := &configuration{
 		EnableIPTables:  true,
@@ -260,7 +262,7 @@ func TestBindHostPortsError(t *testing.T) {
 	}
 	pbs, err := bindHostPorts(context.Background(), cfg, "")
 	assert.Check(t, is.Error(err, "port binding mismatch 80/tcp:8080-8080, 80/tcp:8080-8081"))
-	assert.Check(t, pbs == nil)
+	assert.Check(t, is.Nil(pbs))
 }
 
 func newIPNet(t *testing.T, cidr string) *net.IPNet {
@@ -289,6 +291,7 @@ func TestAddPortMappings(t *testing.T) {
 		busyPortIPv4 int
 		rootless     bool
 		hostAddrs    []string
+		noProxy6To4  bool
 
 		expErr          string
 		expLogs         []string
@@ -450,6 +453,18 @@ func TestAddPortMappings(t *testing.T) {
 			expPBs: []types.PortBinding{
 				{Proto: types.TCP, IP: ctrIP4.IP, Port: 80, HostIP: net.IPv4zero, HostPort: firstEphemPort},
 				{Proto: types.TCP, IP: ctrIP4.IP, Port: 80, HostIP: net.IPv6zero, HostPort: firstEphemPort},
+			},
+		},
+		{
+			name:     "map to ipv4 container with proxy but noProxy6To4",
+			epAddrV4: ctrIP4,
+			cfg: []types.PortBinding{
+				{Proto: types.TCP, Port: 80},
+			},
+			proxyPath:   "/dummy/path/to/proxy",
+			noProxy6To4: true,
+			expPBs: []types.PortBinding{
+				{Proto: types.TCP, IP: ctrIP4.IP, Port: 80, HostIP: net.IPv4zero, HostPort: firstEphemPort},
 			},
 		},
 		{
@@ -746,7 +761,6 @@ func TestAddPortMappings(t *testing.T) {
 	}
 
 	for _, tc := range testcases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			defer netnsutils.SetupTestOSContext(t)()
 
@@ -810,11 +824,12 @@ func TestAddPortMappings(t *testing.T) {
 			n := &bridgeNetwork{
 				config: &networkConfiguration{
 					BridgeName: "dummybridge",
+					EnableIPv4: tc.epAddrV4 != nil,
 					EnableIPv6: tc.epAddrV6 != nil,
 					GwModeIPv4: tc.gwMode4,
 					GwModeIPv6: tc.gwMode6,
 				},
-				driver: newDriver(),
+				driver: newDriver(storeutils.NewTempStore(t)),
 			}
 			genericOption := map[string]interface{}{
 				netlabel.GenericData: &configuration{
@@ -852,7 +867,7 @@ func TestAddPortMappings(t *testing.T) {
 				}
 			})
 
-			pbs, err := n.addPortMappings(ctx, tc.epAddrV4, tc.epAddrV6, tc.cfg, tc.defHostIP)
+			pbs, err := n.addPortMappings(ctx, tc.epAddrV4, tc.epAddrV6, tc.cfg, tc.defHostIP, tc.noProxy6To4)
 			if tc.expErr != "" {
 				assert.ErrorContains(t, err, tc.expErr)
 				return
@@ -870,13 +885,13 @@ func TestAddPortMappings(t *testing.T) {
 				var ipv iptables.IPVersion
 				hip := expChildIP(expPB.HostIP)
 				if expPB.IP.To4() == nil {
-					disableNAT = tc.gwMode6.natDisabled()
+					disableNAT = tc.gwMode6.routed()
 					ipv = iptables.IPv6
 					addrM = ctrIP6.IP.String() + "/128"
 					addrD = "[" + ctrIP6.IP.String() + "]"
 					addrH = hip.String() + "/128"
 				} else {
-					disableNAT = tc.gwMode4.natDisabled()
+					disableNAT = tc.gwMode4.routed()
 					ipv = iptables.IPv4
 					addrM = ctrIP4.IP.String() + "/32"
 					addrD = ctrIP4.IP.String()
@@ -889,8 +904,8 @@ func TestAddPortMappings(t *testing.T) {
 				// Check the MASQUERADE rule.
 				masqRule := fmt.Sprintf("-s %s -d %s -p %s -m %s --dport %d -j MASQUERADE",
 					addrM, addrM, expPB.Proto, expPB.Proto, expPB.Port)
-				ir := iptRule{ipv: ipv, table: iptables.Nat, chain: "POSTROUTING", args: strings.Split(masqRule, " ")}
-				if disableNAT {
+				ir := iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: "POSTROUTING", Args: strings.Split(masqRule, " ")}
+				if disableNAT || tc.proxyPath != "" {
 					assert.Check(t, !ir.Exists(), fmt.Sprintf("unexpected rule %s", ir))
 				} else {
 					assert.Check(t, ir.Exists(), fmt.Sprintf("expected rule %s", ir))
@@ -898,7 +913,7 @@ func TestAddPortMappings(t *testing.T) {
 
 				// Check the DNAT rule.
 				dnatRule := ""
-				if ipv == iptables.IPv6 && !tc.gwMode6.natDisabled() {
+				if ipv == iptables.IPv6 && !tc.gwMode6.routed() {
 					dnatRule += "! -s fe80::/10 "
 				}
 				if tc.proxyPath != "" {
@@ -907,7 +922,7 @@ func TestAddPortMappings(t *testing.T) {
 				}
 				dnatRule += fmt.Sprintf("-d %s -p %s -m %s --dport %d -j DNAT --to-destination %s:%d",
 					addrH, expPB.Proto, expPB.Proto, expPB.HostPort, addrD, expPB.Port)
-				ir = iptRule{ipv: ipv, table: iptables.Nat, chain: "DOCKER", args: strings.Split(dnatRule, " ")}
+				ir = iptables.Rule{IPVer: ipv, Table: iptables.Nat, Chain: "DOCKER", Args: strings.Split(dnatRule, " ")}
 				if disableNAT {
 					assert.Check(t, !ir.Exists(), fmt.Sprintf("unexpected rule %s", ir))
 				} else {
@@ -917,7 +932,7 @@ func TestAddPortMappings(t *testing.T) {
 				// Check that the container's port is open.
 				filterRule := fmt.Sprintf("-d %s ! -i dummybridge -o dummybridge -p %s -m %s --dport %d -j ACCEPT",
 					addrM, expPB.Proto, expPB.Proto, expPB.Port)
-				ir = iptRule{ipv: ipv, table: iptables.Filter, chain: "DOCKER", args: strings.Split(filterRule, " ")}
+				ir = iptables.Rule{IPVer: ipv, Table: iptables.Filter, Chain: "DOCKER", Args: strings.Split(filterRule, " ")}
 				assert.Check(t, ir.Exists(), fmt.Sprintf("expected rule %s", ir))
 			}
 
@@ -935,7 +950,7 @@ func TestAddPortMappings(t *testing.T) {
 				for _, expPB := range tc.expPBs {
 					hip := expChildIP(expPB.HostIP)
 					is4 := hip.To4() != nil
-					if (is4 && tc.gwMode4.natDisabled()) || (!is4 && tc.gwMode6.natDisabled()) {
+					if (is4 && tc.gwMode4.routed()) || (!is4 && tc.gwMode6.routed()) {
 						continue
 					}
 					p := newProxyCall(expPB.Proto.String(),

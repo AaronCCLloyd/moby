@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -291,8 +291,6 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 
 	var out builder.Result
 
-	id := identity.NewID()
-
 	frontendAttrs := map[string]string{}
 
 	if opt.Options.Target != "" {
@@ -356,7 +354,7 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 		return nil, errors.Errorf("network mode %q not supported by buildkit", opt.Options.NetworkMode)
 	}
 
-	extraHosts, err := toBuildkitExtraHosts(opt.Options.ExtraHosts, b.dnsconfig.HostGatewayIP)
+	extraHosts, err := toBuildkitExtraHosts(opt.Options.ExtraHosts, b.dnsconfig.HostGatewayIPs)
 	if err != nil {
 		return nil, err
 	}
@@ -405,6 +403,7 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 		}
 	}
 
+	id := identity.NewID()
 	req := &controlapi.SolveRequest{
 		Ref: id,
 		Exporters: []*controlapi.Exporter{
@@ -432,12 +431,12 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 		if exporterName != exporter.Moby && exporterName != client.ExporterImage {
 			return nil
 		}
-		id, ok := resp.ExporterResponse["containerimage.digest"]
+		imgID, ok := resp.ExporterResponse["containerimage.digest"]
 		if !ok {
 			return errors.Errorf("missing image id")
 		}
-		out.ImageID = id
-		return aux.Emit("moby.image.id", types.BuildResult{ID: id})
+		out.ImageID = imgID
+		return aux.Emit("moby.image.id", types.BuildResult{ID: imgID})
 	})
 
 	ch := make(chan *controlapi.StatusResponse)
@@ -601,7 +600,7 @@ func (j *buildJob) SetUpload(ctx context.Context, rc io.ReadCloser) error {
 }
 
 // toBuildkitExtraHosts converts hosts from docker key:value format to buildkit's csv format
-func toBuildkitExtraHosts(inp []string, hostGatewayIP net.IP) (string, error) {
+func toBuildkitExtraHosts(inp []string, hostGatewayIPs []netip.Addr) (string, error) {
 	if len(inp) == 0 {
 		return "", nil
 	}
@@ -612,17 +611,17 @@ func toBuildkitExtraHosts(inp []string, hostGatewayIP net.IP) (string, error) {
 			return "", errors.Errorf("invalid host %s", h)
 		}
 		// If the IP Address is a "host-gateway", replace this value with the
-		// IP address stored in the daemon level HostGatewayIP config variable.
+		// IP address(es) stored in the daemon level HostGatewayIPs config variable.
 		if ip == opts.HostGatewayName {
-			gateway := hostGatewayIP.String()
-			if gateway == "" {
+			if len(hostGatewayIPs) == 0 {
 				return "", fmt.Errorf("unable to derive the IP value for host-gateway")
 			}
-			ip = gateway
-		} else if net.ParseIP(ip) == nil {
-			return "", fmt.Errorf("invalid host %s", h)
+			for _, gip := range hostGatewayIPs {
+				hosts = append(hosts, host+"="+gip.String())
+			}
+		} else {
+			hosts = append(hosts, host+"="+ip)
 		}
-		hosts = append(hosts, host+"="+ip)
 	}
 	return strings.Join(hosts, ","), nil
 }

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/containerd/log/logtest"
 	"github.com/distribution/reference"
 	"github.com/docker/distribution/manifest/schema1"
 	registrytypes "github.com/docker/docker/api/types/registry"
@@ -123,6 +124,9 @@ func TestValidateManifest(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Needs fixing on Windows")
 	}
+	ctx := context.TODO()
+	ctx = logtest.WithT(ctx, t)
+
 	expectedDigest, err := reference.ParseNormalizedNamed("repo@sha256:02fee8c3220ba806531f606525eceb83f4feb654f62b207191b1c9209188dedd")
 	if err != nil {
 		t.Fatal("could not parse reference")
@@ -142,7 +146,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	verifiedManifest, err := verifySchema1Manifest(&goodSignedManifest, expectedDigest)
+	verifiedManifest, err := verifySchema1Manifest(ctx, &goodSignedManifest, expectedDigest)
 	if err != nil {
 		t.Fatal("validateManifest failed:", err)
 	}
@@ -164,7 +168,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	verifiedManifest, err = verifySchema1Manifest(&extraDataSignedManifest, expectedDigest)
+	verifiedManifest, err = verifySchema1Manifest(ctx, &extraDataSignedManifest, expectedDigest)
 	if err != nil {
 		t.Fatal("validateManifest failed:", err)
 	}
@@ -186,7 +190,7 @@ func TestValidateManifest(t *testing.T) {
 		t.Fatal("error unmarshaling manifest:", err)
 	}
 
-	_, err = verifySchema1Manifest(&badSignedManifest, expectedDigest)
+	_, err = verifySchema1Manifest(ctx, &badSignedManifest, expectedDigest)
 	if err == nil || !strings.HasPrefix(err.Error(), "image verification failed for digest") {
 		t.Fatal("expected validateManifest to fail with digest error")
 	}
@@ -286,9 +290,8 @@ func TestPullSchema2Config(t *testing.T) {
 		},
 	}
 
-	for _, tt := range tests {
-		tt := tt
-		t.Run(tt.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			var callCount atomic.Uint64
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				t.Logf("HTTP %s %s", r.Method, r.URL.Path)
@@ -296,8 +299,8 @@ func TestPullSchema2Config(t *testing.T) {
 				switch {
 				case r.Method == "GET" && r.URL.Path == "/v2":
 					w.WriteHeader(http.StatusOK)
-				case r.Method == "GET" && r.URL.Path == "/v2/docker.io/library/testremotename/blobs/"+expectedDigest.String():
-					tt.handler(int(callCount.Add(1)), w)
+				case r.Method == "GET" && r.URL.Path == "/v2/library/testremotename/blobs/"+expectedDigest.String():
+					tc.handler(int(callCount.Add(1)), w)
 				default:
 					w.WriteHeader(http.StatusNotFound)
 				}
@@ -307,7 +310,7 @@ func TestPullSchema2Config(t *testing.T) {
 			p := testNewPuller(t, ts.URL)
 
 			config, err := p.pullSchema2Config(ctx, expectedDigest)
-			if tt.expectError == "" {
+			if tc.expectError == "" {
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -318,15 +321,15 @@ func TestPullSchema2Config(t *testing.T) {
 				}
 			} else {
 				if err == nil {
-					t.Fatalf("expected error to contain %q", tt.expectError)
+					t.Fatalf("expected error to contain %q", tc.expectError)
 				}
-				if !strings.Contains(err.Error(), tt.expectError) {
-					t.Fatalf("expected error=%q to contain %q", err, tt.expectError)
+				if !strings.Contains(err.Error(), tc.expectError) {
+					t.Fatalf("expected error=%q to contain %q", err, tc.expectError)
 				}
 			}
 
-			if cc := callCount.Load(); cc != tt.expectAttempts {
-				t.Fatalf("got callCount=%d but expected=%d", cc, tt.expectAttempts)
+			if cc := callCount.Load(); cc != tc.expectAttempts {
+				t.Fatalf("got callCount=%d but expected=%d", cc, tc.expectAttempts)
 			}
 		})
 	}
@@ -336,41 +339,27 @@ func testNewPuller(t *testing.T, rawurl string) *puller {
 	t.Helper()
 
 	uri, err := url.Parse(rawurl)
-	if err != nil {
-		t.Fatalf("could not parse url from test server: %v", err)
-	}
+	assert.NilError(t, err, "could not parse url from test server: %v", rawurl)
 
-	endpoint := registry.APIEndpoint{
-		Mirror:       false,
-		URL:          uri,
-		Official:     false,
-		TrimHostname: false,
-		TLSConfig:    nil,
-	}
-	n, _ := reference.ParseNormalizedNamed("testremotename")
+	n, err := reference.ParseNormalizedNamed("testremotename")
+	assert.NilError(t, err)
+
 	repoInfo := &registry.RepositoryInfo{
 		Name: n,
 		Index: &registrytypes.IndexInfo{
-			Name:     "testrepo",
-			Mirrors:  nil,
-			Secure:   false,
-			Official: false,
+			Name: "testrepo",
 		},
-		Official: false,
 	}
 	imagePullConfig := &ImagePullConfig{
 		Config: Config{
-			MetaHeaders: http.Header{},
 			AuthConfig: &registrytypes.AuthConfig{
 				RegistryToken: secretRegistryToken,
 			},
 		},
 	}
 
-	p := newPuller(endpoint, repoInfo, imagePullConfig, nil)
+	p := newPuller(registry.APIEndpoint{URL: uri}, repoInfo, imagePullConfig, nil)
 	p.repo, err = newRepository(context.Background(), p.repoInfo, p.endpoint, p.config.MetaHeaders, p.config.AuthConfig, "pull")
-	if err != nil {
-		t.Fatal(err)
-	}
+	assert.NilError(t, err)
 	return p
 }

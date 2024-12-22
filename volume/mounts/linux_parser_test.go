@@ -100,7 +100,7 @@ func TestLinuxParseMountRaw(t *testing.T) {
 }
 
 func TestLinuxParseMountRawSplit(t *testing.T) {
-	cases := []struct {
+	tests := []struct {
 		bind     string
 		driver   string
 		expected *MountPoint
@@ -249,8 +249,7 @@ func TestLinuxParseMountRawSplit(t *testing.T) {
 		p.fi = mockFiProvider{}
 	}
 
-	for _, tc := range cases {
-		tc := tc
+	for _, tc := range tests {
 		t.Run(tc.bind, func(t *testing.T) {
 			m, err := parser.ParseMountRaw(tc.bind, tc.driver)
 			if tc.expErr != "" {
@@ -332,10 +331,11 @@ func TestConvertTmpfsOptions(t *testing.T) {
 	}
 	p := NewLinuxParser()
 	for _, tc := range cases {
-		data, err := p.ConvertTmpfsOptions(&tc.opt, tc.readOnly)
+		opt := tc.opt
+		data, err := p.ConvertTmpfsOptions(&opt, tc.readOnly)
 		if tc.err {
 			if err == nil {
-				t.Fatalf("expected error for %+v, got nil", tc.opt)
+				t.Fatalf("expected error for %+v, got nil", opt)
 			}
 			continue
 		}

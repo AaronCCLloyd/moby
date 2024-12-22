@@ -1,10 +1,9 @@
-package archive // import "github.com/docker/docker/pkg/archive"
+package archive
 
 import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,7 +17,6 @@ import (
 	"time"
 
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/ioutils"
 	"github.com/moby/sys/userns"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -805,7 +803,7 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		},
 	}
 
-	cases := []struct {
+	tests := []struct {
 		opts        *TarOptions
 		expectedUID int
 		expectedGID int
@@ -816,8 +814,7 @@ func TestTarWithOptionsChownOptsAlwaysOverridesIdPair(t *testing.T) {
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1, GID: 1}, NoLchown: true}, 1, 1},
 		{&TarOptions{ChownOpts: &idtools.Identity{UID: 1000, GID: 1000}, NoLchown: true}, 1000, 1000},
 	}
-	for _, tc := range cases {
-		tc := tc
+	for _, tc := range tests {
 		t.Run("", func(t *testing.T) {
 			reader, err := TarWithOptions(filePath, tc.opts)
 			assert.NilError(t, err)
@@ -853,7 +850,7 @@ func TestTarWithOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cases := []struct {
+	tests := []struct {
 		opts       *TarOptions
 		numChanges int
 	}{
@@ -863,14 +860,14 @@ func TestTarWithOptions(t *testing.T) {
 		{&TarOptions{IncludeFiles: []string{"1", "1"}}, 2},
 		{&TarOptions{IncludeFiles: []string{"1"}, RebaseNames: map[string]string{"1": "test"}}, 4},
 	}
-	for _, testCase := range cases {
-		changes, err := tarUntar(t, origin, testCase.opts)
+	for _, tc := range tests {
+		changes, err := tarUntar(t, origin, tc.opts)
 		if err != nil {
 			t.Fatalf("Error tar/untar when testing inclusion/exclusion: %s", err)
 		}
-		if len(changes) != testCase.numChanges {
+		if len(changes) != tc.numChanges {
 			t.Errorf("Expected %d changes, got %d for %+v:",
-				testCase.numChanges, len(changes), testCase.opts)
+				tc.numChanges, len(changes), tc.opts)
 		}
 	}
 }
@@ -1256,7 +1253,7 @@ func TestXGlobalNoParent(t *testing.T) {
 
 	_, err = os.Lstat(filepath.Join(tmpDir, "foo"))
 	assert.Check(t, err != nil)
-	assert.Check(t, errors.Is(err, os.ErrNotExist))
+	assert.Check(t, is.ErrorIs(err, os.ErrNotExist))
 }
 
 // TestImpliedDirectoryPermissions ensures that directories implied by paths in the tar file, but without their own
@@ -1308,7 +1305,7 @@ func TestImpliedDirectoryPermissions(t *testing.T) {
 
 func TestReplaceFileTarWrapper(t *testing.T) {
 	filesInArchive := 20
-	testcases := []struct {
+	tests := []struct {
 		doc       string
 		filename  string
 		modifier  TarModifierFunc
@@ -1345,16 +1342,16 @@ func TestReplaceFileTarWrapper(t *testing.T) {
 		},
 	}
 
-	for _, testcase := range testcases {
+	for _, tc := range tests {
 		sourceArchive, cleanup := buildSourceArchive(t, filesInArchive)
 		defer cleanup()
 
 		resultArchive := ReplaceFileTarWrapper(
 			sourceArchive,
-			map[string]TarModifierFunc{testcase.filename: testcase.modifier})
+			map[string]TarModifierFunc{tc.filename: tc.modifier})
 
-		actual := readFileFromArchive(t, resultArchive, testcase.filename, testcase.fileCount, testcase.doc)
-		assert.Check(t, is.Equal(testcase.expected, actual), testcase.doc)
+		actual := readFileFromArchive(t, resultArchive, tc.filename, tc.fileCount, tc.doc)
+		assert.Check(t, is.Equal(tc.expected, actual), tc.doc)
 	}
 }
 
@@ -1445,30 +1442,27 @@ func TestDisablePigz(t *testing.T) {
 	t.Setenv("MOBY_DISABLE_PIGZ", "true")
 
 	r := testDecompressStream(t, "gz", "gzip -f")
-	// For the bufio pool
-	outsideReaderCloserWrapper := r.(*ioutils.ReadCloserWrapper)
-	// For the context canceller
-	contextReaderCloserWrapper := outsideReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
 
-	assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
+	// wrapped in closer to cancel contex and release buffer to pool
+	wrapper := r.(*readCloserWrapper)
+
+	assert.Equal(t, reflect.TypeOf(wrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 }
 
 func TestPigz(t *testing.T) {
 	r := testDecompressStream(t, "gz", "gzip -f")
-	// For the bufio pool
-	outsideReaderCloserWrapper := r.(*ioutils.ReadCloserWrapper)
-	// For the context canceller
-	contextReaderCloserWrapper := outsideReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
+	// wrapper for buffered reader and context cancel
+	wrapper := r.(*readCloserWrapper)
 
 	_, err := exec.LookPath("unpigz")
 	if err == nil {
 		t.Log("Tested whether Pigz is used, as it installed")
 		// For the command wait wrapper
-		cmdWaitCloserWrapper := contextReaderCloserWrapper.Reader.(*ioutils.ReadCloserWrapper)
+		cmdWaitCloserWrapper := wrapper.Reader.(*readCloserWrapper)
 		assert.Equal(t, reflect.TypeOf(cmdWaitCloserWrapper.Reader), reflect.TypeOf(&io.PipeReader{}))
 	} else {
 		t.Log("Tested whether Pigz is not used, as it not installed")
-		assert.Equal(t, reflect.TypeOf(contextReaderCloserWrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
+		assert.Equal(t, reflect.TypeOf(wrapper.Reader), reflect.TypeOf(&gzip.Reader{}))
 	}
 }
 

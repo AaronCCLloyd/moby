@@ -54,7 +54,6 @@ func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.doc, func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
@@ -117,7 +116,6 @@ func TestCreateWithInvalidEnv(t *testing.T) {
 	}
 
 	for index, tc := range testCases {
-		tc := tc
 		t.Run(strconv.Itoa(index), func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
@@ -221,7 +219,7 @@ func TestCreateWithCustomMaskedPaths(t *testing.T) {
 		maskedPaths, ok := cfg["MaskedPaths"].([]interface{})
 		assert.Check(t, is.Equal(true, ok), name)
 
-		var mps = make([]string, 0, len(maskedPaths))
+		mps := make([]string, 0, len(maskedPaths))
 		for _, mp := range maskedPaths {
 			mps = append(mps, mp.(string))
 		}
@@ -258,7 +256,7 @@ func TestCreateWithCustomMaskedPaths(t *testing.T) {
 		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
 		assert.NilError(t, err)
 
-		poll.WaitOn(t, ctr.IsInState(ctx, apiClient, c.ID, "exited"), poll.WithDelay(100*time.Millisecond))
+		poll.WaitOn(t, ctr.IsInState(ctx, apiClient, c.ID, "exited"))
 
 		checkInspect(t, ctx, name, tc.expected)
 	}
@@ -302,7 +300,7 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 		readonlyPaths, ok := cfg["ReadonlyPaths"].([]interface{})
 		assert.Check(t, is.Equal(true, ok), name)
 
-		var rops = make([]string, 0, len(readonlyPaths))
+		rops := make([]string, 0, len(readonlyPaths))
 		for _, rop := range readonlyPaths {
 			rops = append(rops, rop.(string))
 		}
@@ -336,7 +334,7 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 		err = apiClient.ContainerStart(ctx, c.ID, container.StartOptions{})
 		assert.NilError(t, err)
 
-		poll.WaitOn(t, ctr.IsInState(ctx, apiClient, c.ID, "exited"), poll.WithDelay(100*time.Millisecond))
+		poll.WaitOn(t, ctr.IsInState(ctx, apiClient, c.ID, "exited"))
 
 		checkInspect(t, ctx, name, tc.expected)
 	}
@@ -403,7 +401,6 @@ func TestCreateWithInvalidHealthcheckParams(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.doc, func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)
@@ -580,7 +577,6 @@ func TestCreateInvalidHostConfig(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.doc, func(t *testing.T) {
 			t.Parallel()
 			ctx := testutil.StartSpan(ctx, t)

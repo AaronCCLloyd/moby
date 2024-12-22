@@ -74,9 +74,16 @@ func (sb *Sandbox) Statistics() (map[string]*types.InterfaceStatistics, error) {
 	return m, nil
 }
 
-func (sb *Sandbox) updateGateway(ep *Endpoint) error {
+func (sb *Sandbox) updateGateway(ep4, ep6 *Endpoint) error {
+	var populated4, populated6 bool
 	sb.mu.Lock()
 	osSbox := sb.osSbox
+	if ep4 != nil {
+		_, populated4 = sb.populatedEndpoints[ep4.ID()]
+	}
+	if ep6 != nil {
+		_, populated6 = sb.populatedEndpoints[ep6.ID()]
+	}
 	sb.mu.Unlock()
 	if osSbox == nil {
 		return nil
@@ -84,20 +91,24 @@ func (sb *Sandbox) updateGateway(ep *Endpoint) error {
 	osSbox.UnsetGateway()     //nolint:errcheck
 	osSbox.UnsetGatewayIPv6() //nolint:errcheck
 
-	if ep == nil {
-		return nil
+	if populated4 {
+		ep4.mu.Lock()
+		joinInfo := ep4.joinInfo
+		ep4.mu.Unlock()
+
+		if err := osSbox.SetGateway(joinInfo.gw); err != nil {
+			return fmt.Errorf("failed to set gateway while updating gateway: %v", err)
+		}
 	}
 
-	ep.mu.Lock()
-	joinInfo := ep.joinInfo
-	ep.mu.Unlock()
+	if populated6 {
+		ep6.mu.Lock()
+		joinInfo := ep6.joinInfo
+		ep6.mu.Unlock()
 
-	if err := osSbox.SetGateway(joinInfo.gw); err != nil {
-		return fmt.Errorf("failed to set gateway while updating gateway: %v", err)
-	}
-
-	if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
-		return fmt.Errorf("failed to set IPv6 gateway while updating gateway: %v", err)
+		if err := osSbox.SetGatewayIPv6(joinInfo.gw6); err != nil {
+			return fmt.Errorf("failed to set IPv6 gateway while updating gateway: %v", err)
+		}
 	}
 
 	return nil
@@ -164,11 +175,8 @@ func (sb *Sandbox) SetKey(ctx context.Context, basePath string) error {
 		}
 	}
 
-	// Set up hosts and resolv.conf files. IPv6 support in the container can't be
-	// determined yet, as sysctls haven't been applied by the runtime. Calling
-	// FinishInit after the container task has been created, when sysctls have been
-	// applied will regenerate these files.
-	if err := sb.finishInitDNS(ctx); err != nil {
+	osSbox.RefreshIPv6LoEnabled()
+	if err := sb.rebuildHostsFile(ctx); err != nil {
 		return err
 	}
 
@@ -181,31 +189,11 @@ func (sb *Sandbox) SetKey(ctx context.Context, basePath string) error {
 	return nil
 }
 
-// FinishConfig completes Sandbox configuration. If called after the container task has been
-// created, and sysctl settings applied, the configuration will be based on the container's
-// IPv6 support.
-func (sb *Sandbox) FinishConfig(ctx context.Context) error {
-	if sb.config.useDefaultSandBox {
-		return nil
-	}
-
-	sb.mu.Lock()
-	osSbox := sb.osSbox
-	sb.mu.Unlock()
-	if osSbox == nil {
-		return nil
-	}
-
-	// If sysctl changes have been made, IPv6 may have been enabled/disabled since last checked.
-	osSbox.RefreshIPv6LoEnabled()
-
-	return sb.finishInitDNS(ctx)
-}
-
+// IPv6Enabled determines whether a container supports IPv6.
 // IPv6 support can always be determined for host networking. For other network
 // types it can only be determined once there's a container namespace to probe,
 // return ok=false in that case.
-func (sb *Sandbox) ipv6Enabled() (enabled, ok bool) {
+func (sb *Sandbox) IPv6Enabled() (enabled, ok bool) {
 	// For host networking, IPv6 support depends on the host.
 	if sb.config.useDefaultSandBox {
 		return netutils.IsV6Listenable(), true
@@ -277,13 +265,19 @@ func (sb *Sandbox) restoreOslSandbox() error {
 		}
 	}
 
-	gwep := sb.getGatewayEndpoint()
-	if gwep == nil {
-		return nil
+	gwep4, gwep6 := sb.getGatewayEndpoint()
+	if gwep4 != nil {
+		if err := sb.osSbox.Restore(interfaces, routes, gwep4.joinInfo.gw, gwep4.joinInfo.gw6); err != nil {
+			return err
+		}
+	}
+	if gwep6 != nil {
+		if err := sb.osSbox.Restore(interfaces, routes, gwep6.joinInfo.gw, gwep6.joinInfo.gw6); err != nil {
+			return err
+		}
 	}
 
-	// restore osl sandbox
-	return sb.osSbox.Restore(interfaces, routes, gwep.joinInfo.gw, gwep.joinInfo.gw6)
+	return nil
 }
 
 func (sb *Sandbox) populateNetworkResources(ctx context.Context, ep *Endpoint) error {
@@ -352,17 +346,17 @@ func (sb *Sandbox) populateNetworkResources(ctx context.Context, ep *Endpoint) e
 		}
 	}
 
-	if ep == sb.getGatewayEndpoint() {
-		if err := sb.updateGateway(ep); err != nil {
-			return err
-		}
-	}
-
 	// Make sure to add the endpoint to the populated endpoint set
-	// before populating loadbalancers.
+	// before updating gateways or populating loadbalancers.
 	sb.mu.Lock()
 	sb.populatedEndpoints[ep.ID()] = struct{}{}
 	sb.mu.Unlock()
+
+	if gw4, gw6 := sb.getGatewayEndpoint(); ep == gw4 || ep == gw6 {
+		if err := sb.updateGateway(gw4, gw6); err != nil {
+			return err
+		}
+	}
 
 	// Populate load balancer only after updating all the other
 	// information including gateway and other routes so that

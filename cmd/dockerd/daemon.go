@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker/api/server/router/build"
 	checkpointrouter "github.com/docker/docker/api/server/router/checkpoint"
 	"github.com/docker/docker/api/server/router/container"
+	debugrouter "github.com/docker/docker/api/server/router/debug"
 	distributionrouter "github.com/docker/docker/api/server/router/distribution"
 	grpcrouter "github.com/docker/docker/api/server/router/grpc"
 	"github.com/docker/docker/api/server/router/image"
@@ -44,6 +45,7 @@ import (
 	"github.com/docker/docker/daemon/config"
 	"github.com/docker/docker/daemon/listeners"
 	"github.com/docker/docker/dockerversion"
+	"github.com/docker/docker/internal/otelutil"
 	"github.com/docker/docker/libcontainerd/supervisor"
 	dopts "github.com/docker/docker/opts"
 	"github.com/docker/docker/pkg/authorization"
@@ -64,8 +66,6 @@ import (
 	"github.com/spf13/pflag"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
@@ -233,7 +233,7 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 
 	const otelServiceNameEnv = "OTEL_SERVICE_NAME"
 	if _, ok := os.LookupEnv(otelServiceNameEnv); !ok {
-		os.Setenv(otelServiceNameEnv, filepath.Base(os.Args[0]))
+		_ = os.Setenv(otelServiceNameEnv, filepath.Base(os.Args[0]))
 	}
 
 	setOTLPProtoDefault()
@@ -242,7 +242,7 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 	// Initialize the trace recorder for buildkit.
 	detect.Recorder = detect.NewTraceRecorder()
 
-	tp := newTracerProvider(ctx)
+	tp, otelShutdown := otelutil.NewTracerProvider(ctx, true)
 	otel.SetTracerProvider(tp)
 	log.G(ctx).Logger.AddHook(tracing.NewLogrusHook())
 
@@ -294,21 +294,19 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 
 	log.G(ctx).Info("Daemon has completed initialization")
 
-	routerCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
 	// Get a the current daemon config, because the daemon sets up config
 	// during initialization. We cannot user the cli.Config for that reason,
 	// as that only holds the config that was set by the user.
 	//
 	// FIXME(thaJeztah): better separate runtime and config data?
 	daemonCfg := d.Config()
-	routerOpts, err := newRouterOptions(routerCtx, &daemonCfg, d, c)
+	routerOpts, err := newRouterOptions(ctx, &daemonCfg, d, c)
 	if err != nil {
 		return err
 	}
 
-	httpServer.Handler = apiServer.CreateMux(routerOpts.Build()...)
+	routers := buildRouters(routerOpts)
+	httpServer.Handler = apiServer.CreateMux(ctx, routers...)
 
 	go d.ProcessClusterNotifications(ctx, c.GetWatchStream())
 
@@ -361,7 +359,7 @@ func (cli *daemonCLI) start(ctx context.Context) (err error) {
 		return errors.Wrap(err, "shutting down due to ServeAPI error")
 	}
 
-	if err := tp.Shutdown(context.Background()); err != nil {
+	if err := otelShutdown(context.WithoutCancel(ctx)); err != nil {
 		log.G(ctx).WithError(err).Error("Failed to shutdown OTEL tracing")
 	}
 
@@ -384,26 +382,12 @@ func setOTLPProtoDefault() {
 
 	if os.Getenv(protoEnv) == "" {
 		if os.Getenv(tracesEnv) == "" {
-			os.Setenv(tracesEnv, defaultProto)
+			_ = os.Setenv(tracesEnv, defaultProto)
 		}
 		if os.Getenv(metricsEnv) == "" {
-			os.Setenv(metricsEnv, defaultProto)
+			_ = os.Setenv(metricsEnv, defaultProto)
 		}
 	}
-}
-
-func newTracerProvider(ctx context.Context) *sdktrace.TracerProvider {
-	opts := []sdktrace.TracerProviderOption{
-		sdktrace.WithResource(resource.Default()),
-		sdktrace.WithSyncer(detect.Recorder),
-	}
-
-	if exp, err := detect.NewSpanExporter(ctx); err != nil {
-		log.G(ctx).WithError(err).Warn("Failed to initialize tracing, skipping")
-	} else if !detect.IsNoneSpanExporter(exp) {
-		opts = append(opts, sdktrace.WithBatcher(exp))
-	}
-	return sdktrace.NewTracerProvider(opts...)
 }
 
 type routerOptions struct {
@@ -415,7 +399,7 @@ type routerOptions struct {
 	cluster        *cluster.Cluster
 }
 
-func newRouterOptions(ctx context.Context, config *config.Config, d *daemon.Daemon, c *cluster.Cluster) (routerOptions, error) {
+func newRouterOptions(ctx context.Context, cfg *config.Config, d *daemon.Daemon, c *cluster.Cluster) (routerOptions, error) {
 	sm, err := session.NewManager()
 	if err != nil {
 		return routerOptions{}, errors.Wrap(err, "failed to create sessionmanager")
@@ -425,26 +409,25 @@ func newRouterOptions(ctx context.Context, config *config.Config, d *daemon.Daem
 	if err != nil {
 		return routerOptions{}, err
 	}
-	cgroupParent := newCgroupParent(config)
 
 	bk, err := buildkit.New(ctx, buildkit.Opt{
 		SessionManager:      sm,
-		Root:                filepath.Join(config.Root, "buildkit"),
+		Root:                filepath.Join(cfg.Root, "buildkit"),
 		EngineID:            d.ID(),
 		Dist:                d.DistributionServices(),
 		ImageTagger:         d.ImageService(),
 		NetworkController:   d.NetworkController(),
-		DefaultCgroupParent: cgroupParent,
+		DefaultCgroupParent: newCgroupParent(cfg),
 		RegistryHosts:       d.RegistryHosts,
-		BuilderConfig:       config.Builder,
-		Rootless:            daemon.Rootless(config),
+		BuilderConfig:       cfg.Builder,
+		Rootless:            daemon.Rootless(cfg),
 		IdentityMapping:     d.IdentityMapping(),
-		DNSConfig:           config.DNSConfig,
+		DNSConfig:           cfg.DNSConfig,
 		ApparmorProfile:     daemon.DefaultApparmorProfile(),
 		UseSnapshotter:      d.UsesSnapshotter(),
 		Snapshotter:         d.ImageService().StorageDriver(),
-		ContainerdAddress:   config.ContainerdAddr,
-		ContainerdNamespace: config.ContainerdNamespace,
+		ContainerdAddress:   cfg.ContainerdAddr,
+		ContainerdNamespace: cfg.ContainerdNamespace,
 		Callbacks: exporter.BuildkitCallbacks{
 			Exported: d.ImageExportedByBuildkit,
 			Named:    d.ImageNamedByBuildkit,
@@ -655,6 +638,11 @@ func loadDaemonCliConfig(opts *daemonOptions) (*config.Config, error) {
 		return nil, err
 	}
 
+	if len(conf.AllowNondistributableArtifacts) > 0 {
+		// TODO(thaJeztah): move to config.Validate and change into an error for v29.0 and remove in v30.0.
+		log.G(context.TODO()).Warn(`DEPRECATED: The "allow-nondistributable-artifacts" config parameter is deprecated and always enabled; this option will be removed in the next release`)
+	}
+
 	return conf, nil
 }
 
@@ -693,7 +681,7 @@ func normalizeHosts(config *config.Config) error {
 	return nil
 }
 
-func (opts routerOptions) Build() []router.Router {
+func buildRouters(opts routerOptions) []router.Router {
 	decoder := runconfig.ContainerDecoder{
 		GetSysInfo: func() *sysinfo.SysInfo {
 			return opts.daemon.RawSysInfo()
@@ -708,8 +696,6 @@ func (opts routerOptions) Build() []router.Router {
 			opts.daemon.ImageService(),
 			opts.daemon.RegistryService(),
 			opts.daemon.ReferenceStore,
-			opts.daemon.ImageService().DistributionServices().ImageStore,
-			opts.daemon.ImageService().DistributionServices().LayerStore,
 		),
 		systemrouter.NewRouter(opts.daemon, opts.cluster, opts.buildkit, opts.daemon.Features),
 		volume.NewRouter(opts.daemon.VolumesService(), opts.cluster),
@@ -718,14 +704,12 @@ func (opts routerOptions) Build() []router.Router {
 		swarmrouter.NewRouter(opts.cluster),
 		pluginrouter.NewRouter(opts.daemon.PluginManager()),
 		distributionrouter.NewRouter(opts.daemon.ImageBackend()),
+		network.NewRouter(opts.daemon, opts.cluster),
+		debugrouter.NewRouter(),
 	}
 
 	if opts.buildBackend != nil {
 		routers = append(routers, grpcrouter.NewRouter(opts.buildBackend))
-	}
-
-	if opts.daemon.NetworkControllerEnabled() {
-		routers = append(routers, network.NewRouter(opts.daemon, opts.cluster))
 	}
 
 	if opts.daemon.HasExperimental() {
@@ -782,6 +766,10 @@ func (cli *daemonCLI) getContainerdDaemonOpts() ([]supervisor.DaemonOpt, error) 
 		//
 		// Also see https://github.com/containerd/containerd/issues/2483#issuecomment-407530608
 		opts = append(opts, supervisor.WithCRIDisabled())
+	}
+
+	if runtime.GOOS == "windows" {
+		opts = append(opts, supervisor.WithDetectLocalBinary())
 	}
 
 	return opts, nil
@@ -1023,4 +1011,31 @@ func overrideProxyEnv(name, val string) {
 		}).Warn("overriding existing proxy variable with value from configuration")
 	}
 	_ = os.Setenv(name, val)
+}
+
+func (cli *daemonCLI) initializeContainerd(ctx context.Context) (func(time.Duration) error, error) {
+	systemContainerdAddr, ok, err := systemContainerdRunning(honorXDG)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not determine whether the system containerd is running")
+	}
+	if ok {
+		// detected a system containerd at the given address.
+		cli.ContainerdAddr = systemContainerdAddr
+		return nil, nil
+	}
+
+	log.G(ctx).Info("containerd not running, starting managed containerd")
+	opts, err := cli.getContainerdDaemonOpts()
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to generate containerd options")
+	}
+
+	r, err := supervisor.Start(ctx, filepath.Join(cli.Root, "containerd"), filepath.Join(cli.ExecRoot, "containerd"), opts...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to start containerd")
+	}
+	cli.ContainerdAddr = r.Address()
+
+	// Try to wait for containerd to shutdown
+	return r.WaitTimeout, nil
 }

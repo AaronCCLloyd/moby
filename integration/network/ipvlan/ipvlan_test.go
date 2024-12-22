@@ -180,7 +180,7 @@ func testIpvlanL2InternalMode(t *testing.T, ctx context.Context, client dclient.
 	id2 := container.Run(ctx, t, client, container.WithNetworkMode(netName))
 
 	result, _ := container.Exec(ctx, client, id1, []string{"ping", "-c", "1", "8.8.8.8"})
-	assert.Check(t, strings.Contains(result.Combined(), "Network is unreachable"))
+	assert.Check(t, is.Contains(result.Combined(), "Network is unreachable"))
 
 	_, err := container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
 	assert.NilError(t, err)
@@ -228,7 +228,7 @@ func testIpvlanL3InternalMode(t *testing.T, ctx context.Context, client dclient.
 	)
 
 	result, _ := container.Exec(ctx, client, id1, []string{"ping", "-c", "1", "8.8.8.8"})
-	assert.Check(t, strings.Contains(result.Combined(), "Network is unreachable"))
+	assert.Check(t, is.Contains(result.Combined(), "Network is unreachable"))
 
 	_, err := container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
 	assert.NilError(t, err)
@@ -452,7 +452,7 @@ func testIpvlanExperimentalV4Only(t *testing.T, ctx context.Context, client dcli
 		net.WithIPv4(false),
 	)
 	defer client.NetworkRemove(ctx, "testnet")
-	assert.Assert(t, is.ErrorContains(err, "IPv4 can only be disabled if experimental features are enabled"))
+	assert.ErrorContains(t, err, "IPv4 can only be disabled if experimental features are enabled")
 }
 
 // Check that an ipvlan interface with '--ipv6=false' doesn't get kernel-assigned
@@ -464,7 +464,7 @@ func TestIpvlanIPAM(t *testing.T) {
 
 	ctx := testutil.StartSpan(baseContext, t)
 
-	testcases := []struct {
+	tests := []struct {
 		name       string
 		apiVersion string
 		enableIPv4 bool
@@ -495,8 +495,7 @@ func TestIpvlanIPAM(t *testing.T) {
 		},
 	}
 
-	for _, tc := range testcases {
-		tc := tc
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := testutil.StartSpan(ctx, t)
 
@@ -582,7 +581,7 @@ func TestIPVlanDNS(t *testing.T) {
 
 	const netName = "ipvlan-dns-net"
 
-	testcases := []struct {
+	tests := []struct {
 		name     string
 		parent   string
 		internal bool
@@ -607,7 +606,7 @@ func TestIPVlanDNS(t *testing.T) {
 	}
 
 	for _, mode := range []string{"l2", "l3"} {
-		for _, tc := range testcases {
+		for _, tc := range tests {
 			name := fmt.Sprintf("Mode=%v/HasParent=%v/Internal=%v", mode, tc.parent != "", tc.internal)
 			t.Run(name, func(t *testing.T) {
 				ctx := testutil.StartSpan(ctx, t)

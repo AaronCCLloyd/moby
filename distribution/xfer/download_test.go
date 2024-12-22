@@ -69,11 +69,11 @@ func createChainIDFromParent(parent layer.ChainID, dgsts ...layer.DiffID) layer.
 		return parent
 	}
 	if parent == "" {
-		return createChainIDFromParent(layer.ChainID(dgsts[0]), dgsts[1:]...)
+		return createChainIDFromParent(layer.ChainID(dgsts[0]), dgsts[1:]...) // #nosec G602 -- false positive: slice bounds out of range
 	}
 	// H = "H(n-1) SHA256(n)"
-	dgst := digest.FromBytes([]byte(string(parent) + " " + string(dgsts[0])))
-	return createChainIDFromParent(layer.ChainID(dgst), dgsts[1:]...)
+	dgst := digest.FromBytes([]byte(string(parent) + " " + string(dgsts[0]))) // #nosec G602 -- false positive: slice bounds out of range
+	return createChainIDFromParent(layer.ChainID(dgst), dgsts[1:]...)         // #nosec G602 -- false positive: slice bounds out of range
 }
 
 func (ls *mockLayerStore) Map() map[layer.ChainID]layer.Layer {
@@ -391,7 +391,6 @@ func TestMaxDownloadAttempts(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			layerStore := &mockLayerStore{make(map[layer.ChainID]*mockLayer)}

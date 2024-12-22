@@ -27,6 +27,7 @@
 			"akerouanton",
 			"akihirosuda",
 			"anusha",
+			"austinvazquez",
 			"coolljt0725",
 			"corhere",
 			"cpuguy83",
@@ -69,7 +70,6 @@
 		people = [
 			"alexellis",
 			"andrewhsu",
-			"austinvazquez",
 			"bsousaa",
 			"dmcgowan",
 			"fntlnz",
@@ -79,7 +79,8 @@
 			"ripcurld",
 			"sam-thibault",
 			"samwhited",
-			"thajeztah"
+			"thajeztah",
+			"thompson-shaun",
 		]
 
 	[Org.Alumni]
@@ -539,6 +540,11 @@
 	Name = "Sebastiaan van Stijn"
 	Email = "github@gone.nl"
 	GitHub = "thaJeztah"
+
+	[people.thompson-shaun]
+	Name = "Shaun Thompson"
+	Email = "shaun.thompson@docker.com"
+	GitHub = "thompson-shaun"
 
 	[people.tianon]
 	Name = "Tianon Gravi"

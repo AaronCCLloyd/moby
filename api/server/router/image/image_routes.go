@@ -248,6 +248,10 @@ func (ir *imageRouter) getImagesGet(ctx context.Context, w http.ResponseWriter, 
 
 	var platform *ocispec.Platform
 	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.48") {
+		if formPlatforms := r.Form["platform"]; len(formPlatforms) > 1 {
+			// TODO(thaJeztah): remove once we support multiple platforms: see https://github.com/moby/moby/issues/48759
+			return errdefs.InvalidParameter(errors.New("multiple platform parameters not supported"))
+		}
 		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
 			p, err := httputils.DecodePlatform(formPlatform)
 			if err != nil {
@@ -273,6 +277,10 @@ func (ir *imageRouter) postImagesLoad(ctx context.Context, w http.ResponseWriter
 
 	var platform *ocispec.Platform
 	if versions.GreaterThanOrEqualTo(httputils.VersionFromContext(ctx), "1.48") {
+		if formPlatforms := r.Form["platform"]; len(formPlatforms) > 1 {
+			// TODO(thaJeztah): remove once we support multiple platforms: see https://github.com/moby/moby/issues/48759
+			return errdefs.InvalidParameter(errors.New("multiple platform parameters not supported"))
+		}
 		if formPlatform := r.Form.Get("platform"); formPlatform != "" {
 			p, err := httputils.DecodePlatform(formPlatform)
 			if err != nil {
@@ -352,6 +360,9 @@ func (ir *imageRouter) getImagesByName(ctx context.Context, w http.ResponseWrite
 		imageInspect.Container = ""        //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
 		imageInspect.ContainerConfig = nil //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.45.
 	}
+	if versions.LessThan(version, "1.48") {
+		imageInspect.Descriptor = nil
+	}
 	return httputils.WriteJSON(w, http.StatusOK, imageInspect)
 }
 
@@ -397,6 +408,7 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 
 	useNone := versions.LessThan(version, "1.43")
 	withVirtualSize := versions.LessThan(version, "1.44")
+	noDescriptor := versions.LessThan(version, "1.48")
 	for _, img := range images {
 		if useNone {
 			if len(img.RepoTags) == 0 && len(img.RepoDigests) == 0 {
@@ -413,6 +425,9 @@ func (ir *imageRouter) getImagesJSON(ctx context.Context, w http.ResponseWriter,
 		}
 		if withVirtualSize {
 			img.VirtualSize = img.Size //nolint:staticcheck // ignore SA1019: field is deprecated, but still set on API < v1.44.
+		}
+		if noDescriptor {
+			img.Descriptor = nil
 		}
 	}
 

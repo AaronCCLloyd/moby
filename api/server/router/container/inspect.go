@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.22
+
 package container // import "github.com/docker/docker/api/server/router/container"
 
 import (
@@ -29,6 +32,9 @@ func (c *containerRouter) getContainersByName(ctx context.Context, w http.Respon
 				ep.Aliases = sliceutil.Dedup(append(ep.Aliases, shortCID, ctr.Config.Hostname))
 			}
 		}
+	}
+	if versions.LessThan(version, "1.48") {
+		ctr.ImageManifestDescriptor = nil
 	}
 
 	return httputils.WriteJSON(w, http.StatusOK, ctr)
